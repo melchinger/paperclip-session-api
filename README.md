@@ -37,42 +37,42 @@ npm start
 ## Beispiel
 
 ```bash
-curl 'https://pc.melchinger.net/session-api/v1/companies' \
+curl 'https://your-host.example.com/session-api/v1/companies' \
   -H 'Authorization: Session <token>'
 ```
 
 ```bash
-curl 'https://pc.melchinger.net/session-api/v1/projects?companyId=c2656035-8c2e-49a8-b946-4906aabbeb9a' \
+curl 'https://your-host.example.com/session-api/v1/projects?companyId=00000000-0000-4000-8000-000000000001' \
   -H 'Authorization: Session <token>'
 ```
 
 ```bash
-curl 'https://pc.melchinger.net/session-api/v1/projects/11111111-1111-4111-8111-111111111111' \
+curl 'https://your-host.example.com/session-api/v1/projects/00000000-0000-4000-8000-000000000002' \
   -H 'Authorization: Session <token>'
 ```
 
 ```bash
-curl 'https://pc.melchinger.net/session-api/v1/agents?companyId=c2656035-8c2e-49a8-b946-4906aabbeb9a' \
+curl 'https://your-host.example.com/session-api/v1/agents?companyId=00000000-0000-4000-8000-000000000001' \
   -H 'Authorization: Session <token>'
 ```
 
 ```bash
-curl 'https://pc.melchinger.net/session-api/v1/issues?companyId=c2656035-8c2e-49a8-b946-4906aabbeb9a' \
+curl 'https://your-host.example.com/session-api/v1/issues?companyId=00000000-0000-4000-8000-000000000001' \
   -H 'Authorization: Session <token>'
 ```
 
 ```bash
-curl 'https://pc.melchinger.net/session-api/v1/issues/SYN-19' \
+curl 'https://your-host.example.com/session-api/v1/issues/SYN-19' \
   -H 'Authorization: Session <token>'
 ```
 
 ```bash
-curl 'https://pc.melchinger.net/session-api/v1/issues/SYN-19/comments' \
+curl 'https://your-host.example.com/session-api/v1/issues/SYN-19/comments' \
   -H 'Authorization: Session <token>'
 ```
 
 ```bash
-curl -X PATCH 'https://pc.melchinger.net/session-api/v1/issues/SYN-19' \
+curl -X PATCH 'https://your-host.example.com/session-api/v1/issues/SYN-19' \
   -H 'Authorization: Session <token>' \
   -H 'Content-Type: application/json' \
   -d '{
@@ -85,8 +85,8 @@ curl -X POST http://127.0.0.1:4310/v1/issues \
   -H 'Authorization: Session <token>' \
   -H 'Content-Type: application/json' \
   -d '{
-    "companyId": "c2656035-8c2e-49a8-b946-4906aabbeb9a",
-    "projectId": "11111111-1111-4111-8111-111111111111",
+    "companyId": "00000000-0000-4000-8000-000000000001",
+    "projectId": "00000000-0000-4000-8000-000000000002",
     "title": "API-Test",
     "description": "erstellt ueber den session service",
     "priority": "medium"

@@ -4,13 +4,13 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/var/lib/paperclip/repos/melchinger/paperclip-session-api
+WorkingDirectory=/opt/paperclip-session-api
 Environment=HOST=127.0.0.1
 Environment=PORT=4310
 Environment=TRUST_PROXY=true
 Environment=BODY_LIMIT=64kb
 Environment=DATABASE_URL=postgresql://paperclip_app:CHANGE_ME@127.0.0.1:5432/paperclip
-ExecStart=/usr/bin/node /var/lib/paperclip/repos/melchinger/paperclip-session-api/src/index.js
+ExecStart=/usr/bin/node /opt/paperclip-session-api/src/index.js
 Restart=always
 RestartSec=2
 User=paperclip
