@@ -28,6 +28,7 @@ Endpunkte:
 - `GET /v1/issues?companyId=<uuid>[&status=<status>][&limit=<n>]`
 - `GET /v1/issues/:issueRef`
 - `GET /v1/issues/:issueRef/comments`
+- `POST /v1/issues/archive`
 - `PATCH /v1/issues/:issueRef`
 - `POST /v1/issues`
 - `POST /v1/issues/:issueRef/comments`
@@ -95,6 +96,18 @@ curl -X PATCH 'https://your-host.example.com/session-api/v1/issues/SYN-19' \
 ```
 
 ```bash
+curl -X POST 'https://your-host.example.com/session-api/v1/issues/archive' \
+  -H 'Authorization: Session <token>' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "companyId": "00000000-0000-4000-8000-000000000001",
+    "status": "done",
+    "before": "2026-04-01",
+    "dryRun": true
+  }'
+```
+
+```bash
 curl -X POST http://127.0.0.1:4310/v1/issues \
   -H 'Authorization: Session <token>' \
   -H 'Content-Type: application/json' \
@@ -132,5 +145,8 @@ Hinweise:
 - `issueRef` akzeptiert UUID oder Identifier wie `SYN-19`
 - `POST /v1/issues` verlangt jetzt immer ein gueltiges `projectId`, das zur angegebenen Company gehoert und fuer den User zugaenglich ist
 - `PATCH /v1/issues/:issueRef` erlaubt: `status`, `title`, `description`, `priority`, `projectId`, `goalId`, `parentId`, `assigneeUserId`, `billingCode`, `hiddenAt`
+- `POST /v1/issues/archive` archiviert alle nicht bereits versteckten Issues einer Company, die vor dem angegebenen Datum erstellt wurden und den angegebenen Status haben
+- `before` kann ein ISO-Datum wie `2026-04-01` oder ein ISO-Datetime sein; Datum ohne Uhrzeit wird als lokaler Tagesanfang interpretiert
+- `dryRun: true` liefert nur die Treffer zur Voransicht und aendert nichts
 - wenn `PAPERCLIP_API_KEY` gesetzt ist, werden Issue- und Kommentar-Create-Requests an die bestehende Paperclip-API delegiert, damit dort die Plugin-Events ausgelöst werden
 - wenn `PAPERCLIP_API_KEY` fehlt, bleibt die API funktional, aber Plugin-Events werden dann nicht erzeugt

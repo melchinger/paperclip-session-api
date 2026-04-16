@@ -60,6 +60,13 @@ const listAgentsQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(200).optional().default(100),
 });
 
+const bulkArchiveIssuesSchema = z.object({
+  companyId: z.string().uuid(),
+  status: z.enum(ISSUE_STATUSES),
+  before: z.string().trim().min(1),
+  dryRun: z.coerce.boolean().optional().default(false),
+});
+
 function envBool(value, fallback) {
   if (value == null) {
     return fallback;
@@ -112,6 +119,16 @@ function getSessionToken(req) {
   const headerToken = req.header("x-session-token");
   if (headerToken && headerToken.trim()) {
     return headerToken.trim();
+  }
+  const cookieHeader = req.header("cookie");
+  if (cookieHeader) {
+    const cookieMatch = cookieHeader.match(
+      /(?:^|;\s*)(?:__Secure-better-auth\.session_token|better-auth\.session_token)=([^;]+)/,
+    );
+    if (cookieMatch && cookieMatch[1]) {
+      const cookieToken = decodeURIComponent(cookieMatch[1].trim());
+      return cookieToken.includes(".") ? cookieToken.split(".")[0] : cookieToken;
+    }
   }
   return null;
 }
@@ -316,6 +333,20 @@ async function resolvePaperclipApiKey() {
     return config.paperclipApiKey.trim();
   }
   return readStoredPaperclipApiKey(config.paperclipApiUrl, config.paperclipAuthStore);
+}
+
+function parseArchiveCutoff(value) {
+  if (!value) {
+    return null;
+  }
+  const normalized = String(value).trim();
+  if (!normalized) {
+    return null;
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+    return new Date(`${normalized}T00:00:00`);
+  }
+  return new Date(normalized);
 }
 
 async function paperclipApiRequest(pathname, init = {}) {
@@ -837,6 +868,159 @@ app.patch("/v1/issues/:issueRef", requireSessionUser, async (req, res, next) => 
 
     await client.query("commit");
     res.json(mapIssueRow(updated));
+  } catch (error) {
+    await client.query("rollback");
+    next(error);
+  } finally {
+    client.release();
+  }
+});
+
+app.post("/v1/issues/archive", requireSessionUser, async (req, res, next) => {
+  const parsed = bulkArchiveIssuesSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid request body", details: parsed.error.flatten() });
+    return;
+  }
+
+  const cutoff = parseArchiveCutoff(parsed.data.before);
+  if (!cutoff || Number.isNaN(cutoff.getTime())) {
+    res.status(400).json({ error: "Invalid cutoff date" });
+    return;
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+
+    const allowed = await assertCompanyAccess(client, req.sessionUser.userId, parsed.data.companyId);
+    if (!allowed) {
+      await client.query("rollback");
+      res.status(403).json({ error: "User does not have access to this company" });
+      return;
+    }
+
+    const { rows: candidates } = await client.query(
+      `select
+         i.id,
+         i.company_id as "companyId",
+         i.project_id as "projectId",
+         i.goal_id as "goalId",
+         i.parent_id as "parentId",
+         i.identifier,
+         i.issue_number as "issueNumber",
+         i.title,
+         i.description,
+         i.status,
+         i.priority,
+         i.assignee_agent_id as "assigneeAgentId",
+         i.assignee_user_id as "assigneeUserId",
+         i.created_by_user_id as "createdByUserId",
+         i.created_at as "createdAt",
+         i.updated_at as "updatedAt",
+         i.hidden_at as "hiddenAt",
+         i.billing_code as "billingCode"
+       from public.issues i
+       where i.company_id = $1
+         and i.status = $2
+         and i.created_at < $3
+         and i.hidden_at is null
+       order by i.created_at asc`,
+      [parsed.data.companyId, parsed.data.status, cutoff],
+    );
+
+    if (parsed.data.dryRun) {
+      await client.query("rollback");
+      res.json({
+        companyId: parsed.data.companyId,
+        status: parsed.data.status,
+        before: cutoff.toISOString(),
+        dryRun: true,
+        matchedCount: candidates.length,
+        archivedCount: 0,
+        issues: candidates.map(mapIssueRow),
+      });
+      return;
+    }
+
+    const ids = candidates.map((issue) => issue.id);
+    if (ids.length === 0) {
+      await client.query("commit");
+      res.json({
+        companyId: parsed.data.companyId,
+        status: parsed.data.status,
+        before: cutoff.toISOString(),
+        dryRun: false,
+        matchedCount: 0,
+        archivedCount: 0,
+        issues: [],
+      });
+      return;
+    }
+
+    const { rows: archivedRows } = await client.query(
+      `update public.issues
+       set hidden_at = now(),
+           updated_at = now()
+       where id = any($1::uuid[])
+       returning
+         id,
+         company_id as "companyId",
+         project_id as "projectId",
+         goal_id as "goalId",
+         parent_id as "parentId",
+         identifier,
+         issue_number as "issueNumber",
+         title,
+         description,
+         status,
+         priority,
+         assignee_agent_id as "assigneeAgentId",
+         assignee_user_id as "assigneeUserId",
+         created_by_user_id as "createdByUserId",
+         created_at as "createdAt",
+         updated_at as "updatedAt",
+         hidden_at as "hiddenAt",
+         billing_code as "billingCode"`,
+      [ids],
+    );
+
+    const archivedById = new Map(archivedRows.map((row) => [row.id, row]));
+    for (const issue of candidates) {
+      const updated = archivedById.get(issue.id);
+      if (!updated) {
+        continue;
+      }
+      await logActivity(client, {
+        companyId: parsed.data.companyId,
+        actorType: "user",
+        actorId: req.sessionUser.userId,
+        action: "issue.updated",
+        entityType: "issue",
+        entityId: issue.id,
+        details: {
+          archivedAt: updated.hiddenAt,
+          archiveBefore: cutoff.toISOString(),
+          archivedReason: "bulk_archive",
+          identifier: issue.identifier,
+          status: issue.status,
+          _previous: {
+            hiddenAt: issue.hiddenAt ?? null,
+          },
+        },
+      });
+    }
+
+    await client.query("commit");
+    res.json({
+      companyId: parsed.data.companyId,
+      status: parsed.data.status,
+      before: cutoff.toISOString(),
+      dryRun: false,
+      matchedCount: candidates.length,
+      archivedCount: archivedRows.length,
+      issues: archivedRows.map(mapIssueRow),
+    });
   } catch (error) {
     await client.query("rollback");
     next(error);
