@@ -10,6 +10,8 @@ Environment=PORT=4310
 Environment=TRUST_PROXY=true
 Environment=BODY_LIMIT=64kb
 Environment=DATABASE_URL=postgresql://paperclip_app:CHANGE_ME@127.0.0.1:5432/paperclip
+Environment=PAPERCLIP_HOME=/var/lib/paperclip
+Environment=PAPERCLIP_AUTH_STORE=/var/lib/paperclip/.paperclip/auth.json
 ExecStart=/usr/bin/node /opt/paperclip-session-api/src/index.js
 Restart=always
 RestartSec=2
