@@ -1,6 +1,8 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const fs = require("node:fs/promises");
+const path = require("node:path");
 const express = require("express");
 const { Pool } = require("pg");
 const { z } = require("zod");
@@ -78,6 +80,12 @@ const config = {
   trustProxy: envBool(process.env.TRUST_PROXY, false),
   bodyLimit: process.env.BODY_LIMIT || "64kb",
   databaseUrl: process.env.DATABASE_URL,
+  paperclipHome: process.env.PAPERCLIP_HOME || "/var/lib/paperclip",
+  paperclipApiUrl: process.env.PAPERCLIP_API_URL || "http://127.0.0.1:3100",
+  paperclipApiKey: process.env.PAPERCLIP_API_KEY || null,
+  paperclipAuthStore: process.env.PAPERCLIP_AUTH_STORE || null,
+  storageRoot: process.env.STORAGE_ROOT || "/var/lib/paperclip/instances/default/data/storage",
+  maxUploadBytes: Number(process.env.MAX_UPLOAD_BYTES || 15 * 1024 * 1024),
 };
 
 if (!config.databaseUrl) {
@@ -266,6 +274,116 @@ async function logActivity(client, entry) {
       JSON.stringify(entry.details || null),
     ],
   );
+}
+
+function getPaperclipAuthStoreCandidates(storePath) {
+  const candidates = [];
+  if (storePath && String(storePath).trim()) {
+    candidates.push(path.resolve(String(storePath).trim()));
+  }
+  const home = path.resolve(config.paperclipHome || "/var/lib/paperclip");
+  candidates.push(path.join(home, ".paperclip", "auth.json"));
+  candidates.push(path.join(home, "auth.json"));
+  candidates.push("/var/lib/paperclip/.paperclip/auth.json");
+  candidates.push("/var/lib/paperclip/auth.json");
+  return [...new Set(candidates)];
+}
+
+async function readStoredPaperclipApiKey(apiBase, storePath) {
+  const normalizedApiBase = String(apiBase || "").trim().replace(/\/+$/, "");
+  for (const candidate of getPaperclipAuthStoreCandidates(storePath)) {
+    try {
+      const raw = await fs.readFile(candidate, "utf8");
+      const parsed = JSON.parse(raw);
+      const credentials = parsed && typeof parsed === "object" ? parsed.credentials : null;
+      if (!credentials || typeof credentials !== "object") {
+        continue;
+      }
+      const credential = credentials[normalizedApiBase] || credentials[apiBase] || null;
+      const token = credential && typeof credential.token === "string" ? credential.token.trim() : "";
+      if (token) {
+        return token;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+async function resolvePaperclipApiKey() {
+  if (config.paperclipApiKey) {
+    return config.paperclipApiKey.trim();
+  }
+  return readStoredPaperclipApiKey(config.paperclipApiUrl, config.paperclipAuthStore);
+}
+
+async function paperclipApiRequest(pathname, init = {}) {
+  const token = await resolvePaperclipApiKey();
+  if (!token) {
+    throw new Error("PAPERCLIP_API_KEY is required to delegate writes to Paperclip");
+  }
+
+  const headers = {
+    accept: "application/json",
+    ...(init.headers || {}),
+    authorization: `Bearer ${token}`,
+  };
+  if (init.body !== undefined && headers["content-type"] == null && headers["Content-Type"] == null) {
+    headers["content-type"] = "application/json";
+  }
+
+  const response = await fetch(new URL(pathname, config.paperclipApiUrl).toString(), {
+    ...init,
+    headers,
+  });
+  if (!response.ok) {
+    const bodyText = await response.text();
+    let detail = bodyText;
+    try {
+      const parsed = JSON.parse(bodyText);
+      if (parsed && typeof parsed === "object") {
+        detail = parsed.error || parsed.message || bodyText;
+      }
+    } catch {
+      // leave detail as raw text
+    }
+    const error = new Error(`Paperclip API ${response.status}: ${detail}`);
+    error.status = response.status;
+    error.body = bodyText;
+    throw error;
+  }
+  const text = await response.text();
+  return text.trim() ? JSON.parse(text) : null;
+}
+
+function mapPaperclipIssueResponse(row) {
+  return {
+    id: row.id,
+    companyId: row.companyId,
+    identifier: row.identifier,
+    issueNumber: row.issueNumber,
+    title: row.title,
+    description: row.description,
+    status: row.status,
+    priority: row.priority,
+    createdByUserId: row.createdByUserId,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+function mapPaperclipCommentResponse(row, issueIdentifier) {
+  return {
+    id: row.id,
+    companyId: row.companyId,
+    issueId: row.issueId,
+    authorUserId: row.authorUserId,
+    body: row.body,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    issueIdentifier,
+  };
 }
 
 function mapIssueRow(row) {
@@ -758,6 +876,28 @@ app.post("/v1/issues", requireSessionUser, async (req, res, next) => {
       return;
     }
 
+    const paperclipApiKey = await resolvePaperclipApiKey();
+    if (paperclipApiKey) {
+      const created = await paperclipApiRequest(`/api/companies/${input.companyId}/issues`, {
+        method: "POST",
+        body: JSON.stringify({
+          projectId: input.projectId,
+          goalId: input.goalId ?? null,
+          parentId: input.parentId ?? null,
+          title: input.title,
+          description: input.description ?? null,
+          status: input.status,
+          priority: input.priority,
+          assigneeUserId: input.assigneeUserId ?? null,
+          billingCode: input.billingCode ?? null,
+          labelIds: input.labelIds,
+        }),
+      });
+      await client.query("rollback");
+      res.status(201).json(mapPaperclipIssueResponse(created));
+      return;
+    }
+
     const counterResult = await client.query(
       `update public.companies
        set issue_counter = issue_counter + 1,
@@ -874,6 +1014,19 @@ app.post("/v1/issues/:issueRef/comments", requireSessionUser, async (req, res, n
       return;
     }
 
+    const paperclipApiKey = await resolvePaperclipApiKey();
+    if (paperclipApiKey) {
+      const comment = await paperclipApiRequest(`/api/issues/${issue.id}/comments`, {
+        method: "POST",
+        body: JSON.stringify({
+          body: parsed.data.body,
+        }),
+      });
+      await client.query("rollback");
+      res.status(201).json(mapPaperclipCommentResponse(comment, issue.identifier));
+      return;
+    }
+
     const commentId = crypto.randomUUID();
     const commentResult = await client.query(
       `insert into public.issue_comments (
@@ -906,7 +1059,7 @@ app.post("/v1/issues/:issueRef/comments", requireSessionUser, async (req, res, n
 
     await client.query(
       `update public.issues
-       set updated_at = now()
+      set updated_at = now()
        where id = $1`,
       [issue.id],
     );
@@ -923,6 +1076,140 @@ app.post("/v1/issues/:issueRef/comments", requireSessionUser, async (req, res, n
     client.release();
   }
 });
+
+function pad2(n) {
+  return n < 10 ? "0" + n : "" + n;
+}
+
+function buildAttachmentObjectKey(companyId, issueId, assetUuid, filename) {
+  const now = new Date();
+  const yyyy = now.getUTCFullYear();
+  const mm = pad2(now.getUTCMonth() + 1);
+  const dd = pad2(now.getUTCDate());
+  return `${companyId}/issues/${issueId}/${yyyy}/${mm}/${dd}/${assetUuid}-${filename}`;
+}
+
+function safeFilename(name) {
+  if (typeof name !== "string" || name.length === 0 || name.length > 255) {
+    return null;
+  }
+  if (name.includes("/") || name.includes("\\") || name === "." || name === "..") {
+    return null;
+  }
+  if (!/^[A-Za-z0-9._\-+:]+$/.test(name)) {
+    return null;
+  }
+  return name;
+}
+
+app.post(
+  "/v1/issues/:issueRef/attachments",
+  requireSessionUser,
+  express.raw({ type: "*/*", limit: config.maxUploadBytes }),
+  async (req, res, next) => {
+    const filename = safeFilename(typeof req.query.filename === "string" ? req.query.filename : "");
+    if (!filename) {
+      res.status(400).json({ error: "Missing or invalid filename query parameter" });
+      return;
+    }
+    const contentType = (req.header("content-type") || "").split(";")[0].trim() || "application/octet-stream";
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+      res.status(400).json({ error: "Empty request body" });
+      return;
+    }
+    const dedupeKey = typeof req.query.dedupeKey === "string" && req.query.dedupeKey.length > 0
+      ? req.query.dedupeKey
+      : null;
+
+    const client = await pool.connect();
+    try {
+      const issue = await resolveIssueForUser(client, req.sessionUser.userId, req.params.issueRef);
+      if (!issue) {
+        res.status(404).json({ error: "Issue not found" });
+        return;
+      }
+
+      if (dedupeKey) {
+        const existing = await client.query(
+          `select a.id as "assetId",
+                  a.object_key as "objectKey",
+                  a.content_type as "contentType",
+                  a.byte_size as "byteSize",
+                  a.sha256,
+                  a.original_filename as "originalFilename",
+                  ia.id as "attachmentId",
+                  ia.created_at as "createdAt"
+             from public.issue_attachments ia
+             join public.assets a on a.id = ia.asset_id
+            where ia.issue_id = $1
+              and a.original_filename = $2
+            limit 1`,
+          [issue.id, dedupeKey],
+        );
+        if (existing.rows.length > 0) {
+          res.status(200).json({ ...existing.rows[0], deduped: true });
+          return;
+        }
+      }
+
+      const assetUuid = crypto.randomUUID();
+      const objectKey = buildAttachmentObjectKey(issue.company_id, issue.id, assetUuid, filename);
+      const absPath = path.join(config.storageRoot, objectKey);
+
+      await fs.mkdir(path.dirname(absPath), { recursive: true });
+      await fs.writeFile(absPath, req.body, { mode: 0o640 });
+      const sha256 = crypto.createHash("sha256").update(req.body).digest("hex");
+
+      await client.query("begin");
+      try {
+        await client.query(
+          `insert into public.assets
+             (id, company_id, provider, object_key, content_type,
+              byte_size, sha256, original_filename, created_by_user_id,
+              created_at, updated_at)
+           values ($1, $2, 'local_disk', $3, $4, $5, $6, $7, $8, now(), now())`,
+          [
+            assetUuid,
+            issue.company_id,
+            objectKey,
+            contentType,
+            req.body.length,
+            sha256,
+            dedupeKey || filename,
+            req.sessionUser.userId,
+          ],
+        );
+        const attachment = await client.query(
+          `insert into public.issue_attachments
+             (company_id, issue_id, asset_id, created_at, updated_at)
+           values ($1, $2, $3, now(), now())
+           returning id, created_at as "createdAt"`,
+          [issue.company_id, issue.id, assetUuid],
+        );
+        await client.query("commit");
+        res.status(201).json({
+          assetId: assetUuid,
+          attachmentId: attachment.rows[0].id,
+          objectKey,
+          contentType,
+          byteSize: req.body.length,
+          sha256,
+          originalFilename: dedupeKey || filename,
+          createdAt: attachment.rows[0].createdAt,
+          deduped: false,
+        });
+      } catch (error) {
+        await client.query("rollback");
+        try { await fs.unlink(absPath); } catch (_) {}
+        throw error;
+      }
+    } catch (error) {
+      next(error);
+    } finally {
+      client.release();
+    }
+  },
+);
 
 app.use((error, _req, res, _next) => {
   console.error(error);

@@ -7,6 +7,14 @@ Zweck:
 - neues Ticket mit bestehendem User-Session-Token anlegen
 - Kommentar auf bestehendes Ticket schreiben
 
+Wichtig:
+- fuer Issue- und Kommentar-Erstellung mit Plugin-Events braucht der Service einen gueltigen Paperclip-Board/API-Token
+- ohne `PAPERCLIP_API_KEY` faellt der Service auf die direkte DB-Schreibweise zurueck, dabei werden keine Plugin-Events im Hauptsystem ausgelöst
+- wenn `PAPERCLIP_API_KEY` nicht gesetzt ist, liest der Service den Token automatisch aus `PAPERCLIP_AUTH_STORE` oder aus `${PAPERCLIP_HOME}/.paperclip/auth.json`
+- die `board_api_keys`-Tabelle speichert den Secret-Token nicht, sondern nur Hash und Metadaten; fuer den Request-Header braucht die Session-API den Auth-Store oder `PAPERCLIP_API_KEY`
+- Attachment-Uploads bleiben lokal und laufen nicht ueber die Paperclip-API
+- auf dieser Box ist der systemd-Override auf `PAPERCLIP_HOME=/var/lib/paperclip` und `PAPERCLIP_AUTH_STORE=/var/lib/paperclip/.paperclip/auth.json` gesetzt
+
 Auth:
 - `Authorization: Session <token>`
 - alternativ `X-Session-Token: <token>`
@@ -30,6 +38,12 @@ Endpunkte:
 
 ```bash
 export DATABASE_URL='postgresql://paperclip_app:...@127.0.0.1:5432/paperclip'
+# optional, enables proxying issue/comment writes through Paperclip so plugin events fire
+# if omitted, issue/comment writes still work but do not trigger the main app plugin bus
+export PAPERCLIP_API_URL='http://127.0.0.1:3100'
+export PAPERCLIP_API_KEY='pcp_board_...'
+# optional override if your auth store lives elsewhere
+# export PAPERCLIP_AUTH_STORE='/var/lib/paperclip/.paperclip/auth.json'
 npm install
 npm start
 ```
@@ -118,3 +132,5 @@ Hinweise:
 - `issueRef` akzeptiert UUID oder Identifier wie `SYN-19`
 - `POST /v1/issues` verlangt jetzt immer ein gueltiges `projectId`, das zur angegebenen Company gehoert und fuer den User zugaenglich ist
 - `PATCH /v1/issues/:issueRef` erlaubt: `status`, `title`, `description`, `priority`, `projectId`, `goalId`, `parentId`, `assigneeUserId`, `billingCode`, `hiddenAt`
+- wenn `PAPERCLIP_API_KEY` gesetzt ist, werden Issue- und Kommentar-Create-Requests an die bestehende Paperclip-API delegiert, damit dort die Plugin-Events ausgelöst werden
+- wenn `PAPERCLIP_API_KEY` fehlt, bleibt die API funktional, aber Plugin-Events werden dann nicht erzeugt
